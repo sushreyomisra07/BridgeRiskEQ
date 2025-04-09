@@ -9,6 +9,9 @@ from typing import Tuple
 pd.options.mode.chained_assignment = None  # default='warn'
 import os.path as path
 import unittest
+import networkx as nx
+
+RECOVERY_TIME_STEPS = np.insert(np.round(np.logspace(start=np.log10(0.1), stop=np.log10(1000), num=99), 2), 0, 0)
 
 # Function to set default values if any of the NBI data is not given
 #Set to default values if any of the required NBI data is not available
@@ -227,3 +230,157 @@ def bridge_frag(bridge_df, damage_state: int)\
     
     #Return probability of failure
     return Pf
+
+# Compute recovery given failure 
+def Recov_given_failure(damage_state: int, time: Union[List[float], np.ndarray]= RECOVERY_TIME_STEPS) -> Union[float,np.ndarray]:
+    """
+    This function computes recovery given failure using Hazus parameters
+    
+    Arguments:
+      damage_state  -- damage state. Valid inputs are 1, 2, or 3(one damage state at a time). \
+                        1: "moderate damage"; 2: "extensive damage"; 3: "complete damage"
+      time  -- time in days following earthquake
+    Returns:
+      Probability of recovery given failure 
+    
+    """
+        
+    #Hazus recovery parameters
+    dict_param = {'Damage States': ['DS1','DS2','DS3','DS4'],
+                  'Mean': [0.6, 2.5, 75.0, 230.0],
+                  'SD': [0.6, 2.7, 42.0, 110.0]
+                  }
+    #Hazus recovery parameters
+    # dict_param = {'Damage States': ['DS1','DS2','DS3'],
+    #               'Mean': [2.5, 75.0, 230.0],
+    #               'SD': [2.7, 42.0, 110.0]
+    #               }
+
+    
+    #Convert dictionary to dataframes
+    df_param = pd.DataFrame(dict_param)
+    df_param.set_index('Damage States',inplace=True)  
+
+    #Get paramaters corresponding to each damage state
+    Mean =  df_param.iloc[damage_state-1,0]
+    SD =  df_param.iloc[damage_state-1,1]
+
+    #Compute probability of recovery
+    Pr = norm.cdf(time,Mean,SD)
+    
+    #Return probability of recovery
+    return Pr
+
+# Compute Recovery Given Sa
+def get_recov_curve(bridge_df: pd.DataFrame, 
+                    Sa10: float, 
+                    Sa03:float, 
+                    time: Union[List[float], np.ndarray] = RECOVERY_TIME_STEPS
+)-> Tuple[np.ndarray, np.ndarray]:
+    
+    """
+    This function compute recovery given Sa10 values.
+    
+    Arguments:
+       df_NBI_data -- dataframe of NBI bridge data
+       bridge_df_imported --  imported bridge fragility functions from CSV file
+       Sa10 -- Spectral acceleration value at 1.0 s in units of g
+       Sa03 -- spectral acceleration at 0.3 s in g
+       time  -- time in days following earthquake
+    Returns:
+      time and functionality varying from 0 to 1
+    """
+    
+    DSs = [1,2,3,4] #All damage states
+    Pf = [0]*5 #presizing including the no damage state
+    Pf[0] = 1-bridge_frag(bridge_df,1) #No damage
+    Pf[1] = bridge_frag(bridge_df,1)-bridge_frag(bridge_df,2) #slight 
+    Pf[2] = bridge_frag(bridge_df,2)-bridge_frag(bridge_df,3) #moderate 
+    Pf[3] = bridge_frag(bridge_df,3)-bridge_frag(bridge_df,4) #extensive
+    Pf[4] = bridge_frag(bridge_df,4)                                     #complete
+    Pfn = Pf[0] 
+    for ds in DSs:
+        Pfn = Pfn+Recov_given_failure(ds,time)*Pf[ds]
+
+    #reset the variable names so that they are easy to be understood by the ENG team
+    time_days = time
+    functionality = Pfn
+
+    return time_days, functionality 
+
+# Compute mean and standard deviation of downtime 
+def get_downtime_mean_std(bridge_df: pd.DataFrame, 
+                          time: Union[List[float], np.ndarray]= RECOVERY_TIME_STEPS
+) -> Tuple[float,float]:
+    """
+    This function computes mean and standard deviation of downtime given Sa at 1.0 s
+       
+    Arguments:
+      df_NBI_data -- dataframe of NBI bridge data
+      bridge_df_imported --  imported bridge fragility functions from CSV file
+      Sa10 -- Spectral acceleration value at 1.0 s in units of g
+      Sa03 -- spectral acceleration at 0.3 s in g
+      time  -- time in days following earthquake (optional)
+    Returns:
+      bridge_downtime_days --  mean downtime in days
+      stdev_bridge_downtime_days -- standard deviation of downtime in days
+    
+    """
+    
+    #Compute the functionality curve
+    _,Pfn = get_recov_curve(bridge_df,time)
+    
+    #Compute mean downtime
+    expected_downtime = np.trapz(1-Pfn,time)  
+    
+    #Compute standard deviation of downtime
+    expected_square_downtime = np.trapz(2*time*(1-Pfn), time)  
+    variance_downtime = expected_square_downtime - expected_downtime ** 2
+    standard_deviation = np.sqrt(variance_downtime) 
+    
+    #Final output in days (not converted to hours unlike WS and floods)
+    mean_downtime_days = expected_downtime
+    stdev_downtime_days = standard_deviation
+       
+    return mean_downtime_days, stdev_downtime_days
+
+
+def create_networkx_graph(nodes_gdf, 
+                          edges_gdf,
+                          fromnode = 'fromnode',
+                          tonode = 'tonode',
+                          node_id = 'nodenwid'
+                         
+):
+    # Ensure node_id is present in nodes_gdf
+    if node_id not in nodes_gdf.columns:
+        raise ValueError("Ensure that the correct Node ID Column in the input nodes geodataframe is used")
+
+    # Ensure source and target are present in edges_gdf
+    if fromnode not in edges_gdf.columns or tonode not in edges_gdf.columns:
+        raise ValueError("Ensure that the correct fromnode and tonode columns in the input nodes geodataframe is used")
+
+    # Create a directed graph (change to nx.Graph() for undirected)
+    # G = nx.DiGraph()
+    G = nx.Graph()
+
+    # Add nodes with attributes
+    for _, row in nodes_gdf.iterrows():
+        G.add_node(
+            row[node_id],
+            **row.drop(['geometry', node_id]).to_dict(),  # Add all columns except geometry and node_id
+            geometry=row['geometry']  # Add geometry separately
+        )
+
+    # Add edges with attributes
+    for _, row in edges_gdf.iterrows():
+        G.add_edge(
+            row[fromnode],  # Source node
+            row[tonode],  # Target node
+            **row.drop(['geometry', fromnode, tonode]).to_dict(),  # Add all columns except geometry, source, and target
+            geometry=row['geometry']  # Add geometry separately
+        )
+
+    return G
+
+
