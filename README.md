@@ -10,5 +10,7 @@ The local hazard intensity at the location of each bridge is based on a raster l
 Since each of the datasets above are obtained at various spatial resolutions (e.g. national, state), a set of regional boundary shapefiles are used to clip the datasets within the study area, which have been downloaded from https://catalog.data.gov/dataset/tiger-line-shapefile-2019-county-shelby-county-tn-all-roads-county-based-shapefile
 .
 
+The transportation network data is downloaded from OpenStreetMap: https://www.openstreetmap.org/#map=4/37.65/-82.00
+. The OSM data has been downloaded, preprocessed and saved in the form of shapefiles in this directory.
 
  
